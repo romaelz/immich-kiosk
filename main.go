@@ -43,6 +43,7 @@ func init() {
 	routes.KioskVersion = version
 }
 
+// main initializes and starts the Immich Kiosk web server, sets up configuration, middleware, routes, and manages graceful shutdown.
 func main() {
 
 	fmt.Println(kioskBanner)
@@ -103,8 +104,14 @@ func main() {
 	e := echo.New()
 	e.HideBanner = true
 	e.HidePort = true
+	if baseConfig.Kiosk.BehindProxy {
+		e.IPExtractor = echo.ExtractIPFromXFFHeader()
+	} else {
+		e.IPExtractor = echo.ExtractIPDirect()
+	}
 
 	// Middleware
+	e.Pre(middleware.RemoveTrailingSlash())
 	e.Use(middleware.Recover())
 	e.Use(middleware.RequestID())
 
@@ -121,12 +128,12 @@ func main() {
 				// skip auth for assets
 				return strings.HasPrefix(c.Request().URL.String(), "/assets")
 			},
-			KeyLookup: "query:password,form:password",
+			KeyLookup: "header:Authorization,header:X-Api-Key,query:authsecret,query:password,form:authsecret,form:password",
 			Validator: func(queryPassword string, _ echo.Context) (bool, error) {
 				return queryPassword == baseConfig.Kiosk.Password, nil
 			},
 			ErrorHandler: func(_ error, c echo.Context) error {
-				return c.String(http.StatusUnauthorized, "Unauthorized")
+				return routes.RenderUnauthorized(c)
 			},
 		}))
 	}
@@ -140,7 +147,9 @@ func main() {
 	// serve embdedd staic assets
 	e.StaticFS("/assets", echo.MustSubFS(public, "frontend/public/assets"))
 
-	e.GET("/", routes.Home(baseConfig))
+	e.GET("/", routes.Home(baseConfig, c))
+
+	e.GET("/about", routes.About(baseConfig))
 
 	e.GET("/assets/manifest.json", routes.Manifest)
 
@@ -178,7 +187,7 @@ func main() {
 
 	e.GET("/video/:videoID", routes.NewVideo(baseConfig.Kiosk.DemoMode))
 
-	e.GET("/:redirect", routes.Redirect(baseConfig))
+	e.GET("/:redirect", routes.Redirect(baseConfig, c))
 
 	for _, w := range baseConfig.WeatherLocations {
 		go weather.AddWeatherLocation(c.Context(), w)

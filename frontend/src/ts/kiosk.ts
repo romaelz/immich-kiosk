@@ -12,6 +12,7 @@ import {
   togglePolling,
   pausePolling,
   videoHandler,
+  triggerNewAsset,
 } from "./polling";
 import { preventSleep } from "./wakelock";
 import {
@@ -166,7 +167,7 @@ async function init(): Promise<void> {
 
   if ("serviceWorker" in navigator) {
     navigator.serviceWorker.register("/assets/js/sw.js").then(
-      function (registration) {
+      function () {
         console.log("ServiceWorker registration successful");
       },
       function (err) {
@@ -558,6 +559,7 @@ document.addEventListener("DOMContentLoaded", () => {
 });
 
 export {
+  triggerNewAsset,
   cleanupFrames,
   startPolling,
   stopPolling,

@@ -1,15 +1,15 @@
 services:
   immich-kiosk:
-    image: damongolding/immich-kiosk:0.21.0
+    image: ghcr.io/damongolding/immich-kiosk:latest
     container_name: immich-kiosk
     tty: true
     environment:
       LANG: "en_GB"
       TZ: "Europe/London"
     ports:
-      - 4000:4000
+      - 3000:3000
     volumes:
-      - ./config.yaml:/config.yaml
+      - ./config:/config
       # - ./custom.css:/custom.css
       # - ./offline-assets:/offline-assets
     restart: always
