@@ -1,5 +1,5 @@
 # Frontend Base Image
-FROM node:20-slim AS frontend-base
+FROM node:22-slim AS frontend-base
 
 ENV PNPM_HOME="/pnpm"
 ENV PATH="$PNPM_HOME:$PATH"
@@ -17,9 +17,9 @@ RUN --mount=type=cache,id=pnpm,target=/pnpm/store pnpm install --frozen-lockfile
 RUN pnpm css && pnpm js
 
 # Go Builder
-FROM --platform=$BUILDPLATFORM golang:1.24.3-alpine AS build
+FROM --platform=$BUILDPLATFORM golang:1.24.4-alpine AS build
 
-ARG VERSION=demo
+ARG VERSION=0.21.6
 ARG TARGETOS
 ARG TARGETARCH
 
