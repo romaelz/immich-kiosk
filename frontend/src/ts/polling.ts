@@ -245,7 +245,7 @@ class PollingController {
         console.error("Video failed to start playing within timeout period");
         this.handleVideoTimeout();
       }
-    }, 5000); // 5 seconds timeout
+    }, 15000); // 15 seconds timeout
 
     // Add listener for when video starts playing
     this.video.addEventListener("playing", this.handlePlayStart(), {
