@@ -19,7 +19,7 @@ RUN pnpm css && pnpm js && pnpm url-builder
 # Go Builder
 FROM --platform=$BUILDPLATFORM golang:1.25.5-bookworm AS build
 
-ARG VERSION=0.21.6
+ARG VERSION=0.30.1
 ARG TARGETOS
 ARG TARGETARCH
 
