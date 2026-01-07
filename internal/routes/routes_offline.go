@@ -21,10 +21,13 @@ import (
 	"github.com/charmbracelet/log"
 	"github.com/damongolding/immich-kiosk/internal/common"
 	"github.com/damongolding/immich-kiosk/internal/config"
+	"github.com/damongolding/immich-kiosk/internal/i18n"
+	"github.com/damongolding/immich-kiosk/internal/immich"
 	"github.com/damongolding/immich-kiosk/internal/kiosk"
 	imageComponent "github.com/damongolding/immich-kiosk/internal/templates/components/image"
 	"github.com/damongolding/immich-kiosk/internal/templates/partials"
 	"github.com/damongolding/immich-kiosk/internal/utils"
+	"github.com/damongolding/immich-kiosk/internal/webhooks"
 	"github.com/dustin/go-humanize"
 	"github.com/klauspost/compress/zstd"
 	"github.com/labstack/echo/v4"
@@ -56,7 +59,8 @@ func OfflineMode(baseConfig *config.Config, com *common.Common) echo.HandlerFunc
 		requestConfig := *baseConfig
 		requestConfig.History = requestData.RequestConfig.History
 		requestConfig.Memories = false
-		requestConfig.ExperimentalAlbumVideo = false
+		requestConfig.ShowVideos = false
+		requestConfig.Theme = requestData.RequestConfig.Theme
 
 		if len(requestConfig.History) > 1 && !strings.HasPrefix(requestConfig.History[len(requestConfig.History)-1], "*") {
 			return NextHistoryAsset(baseConfig, com, c)
@@ -99,7 +103,7 @@ func OfflineMode(baseConfig *config.Config, com *common.Common) echo.HandlerFunc
 		}
 
 		if requestConfig.OfflineMode.ExpirationHours > 0 {
-			expired, expiredErr := checkOfflineAssetsExpiration()
+			expired, expiredErr := checkOfflineAssetsExpiration(com.Context(), requestConfig.ImmichURL)
 			if expiredErr != nil {
 				return expiredErr
 			}
@@ -134,6 +138,10 @@ func OfflineMode(baseConfig *config.Config, com *common.Common) echo.HandlerFunc
 			viewData.DeviceID = deviceID
 			utils.TrimHistory(&requestConfig.History, kiosk.HistoryLimit)
 			viewData.History = requestConfig.History
+			viewData.Theme = requestConfig.Theme
+			viewData.Kiosk.DemoMode = requestConfig.Kiosk.DemoMode
+
+			go webhooks.Trigger(com.Context(), requestData, KioskVersion, webhooks.NewOfflineAsset, viewData)
 
 			return Render(c, http.StatusOK, imageComponent.Image(viewData, com.Secret()))
 		}
@@ -169,6 +177,7 @@ func downloadOfflineAssets(requestConfig config.Config, requestCtx common.Contex
 	}
 	defer mu.Unlock()
 
+	requestConfig.UseOfflineMode = true
 	parallelDownloads := requestConfig.OfflineMode.ParallelDownloads
 	numberOfAssets := requestConfig.OfflineMode.NumberOfAssets
 	maxSize, maxSizeErr := utils.ParseSize(requestConfig.OfflineMode.MaxSize)
@@ -234,10 +243,13 @@ func downloadOfflineAssets(requestConfig config.Config, requestCtx common.Contex
 				viewData.UseOfflineMode = true
 				viewData.History = []string{}
 
-				var filename string
+				var sb strings.Builder
 				for _, asset := range viewData.Assets {
-					filename += asset.ImmichAsset.ID + asset.User
+					sb.WriteString(asset.ImmichAsset.ID)
+					sb.WriteString(asset.User)
 				}
+
+				filename := sb.String()
 				filename = filepath.Join(OfflineAssetsPath, generateCacheFilename(filename))
 
 				if _, exists := createdFiles.Load(filename); exists {
@@ -468,20 +480,26 @@ func handleNoOfflineAssets(c echo.Context, requestConfig config.Config, com *com
 		}
 	}
 
+	t := i18n.T()
+
 	message := fmt.Sprintf(`
 		<ul>
-			<li>Limit: <strong>%v</strong> assets</li>
-			<li>Storage Capacity: <strong>%s</strong> </li>
-			<li>Expiration: <strong>%s</strong></li>
+			<li>%s: <strong>%v</strong> %s</li>
+			<li>%s: <strong>%s</strong></li>
+			<li>%s: <strong>%s</strong></li>
 		</ul>
 		`,
+		t("limit"),
 		requestConfig.OfflineMode.NumberOfAssets,
+		t("assets"),
+		t("storage_capacity"),
 		maxSizeMessage,
+		t("expiration"),
 		expiryMessage,
 	)
 
 	return Render(c, http.StatusOK, partials.Message(partials.MessageData{
-		Title:         "Downloading Assets",
+		Title:         t("downloading_assets"),
 		Message:       message,
 		IsDownloading: true,
 	}))
@@ -496,7 +514,7 @@ func handleNoOfflineAssets(c echo.Context, requestConfig config.Config, com *com
 // Returns:
 //   - bool: true if assets have expired, false otherwise
 //   - error: any error encountered during the process
-func checkOfflineAssetsExpiration() (bool, error) {
+func checkOfflineAssetsExpiration(ctx context.Context, immichURL string) (bool, error) {
 	expirationContent, expirationErr := os.ReadFile(filepath.Join(OfflineAssetsPath, OfflineExpirationFilename))
 	if expirationErr != nil {
 		log.Warn("expiration missing", "err", expirationErr)
@@ -510,6 +528,10 @@ func checkOfflineAssetsExpiration() (bool, error) {
 	}
 
 	if time.Now().After(expirationTime) {
+		if !immich.IsOnline(ctx, immichURL) {
+			log.Warn("Offline assets have expired but Immich is offline")
+			return false, nil
+		}
 		log.Info("Offline assets have expired")
 		cleanErr := utils.CleanDirectory(OfflineAssetsPath)
 		if cleanErr != nil {
@@ -525,8 +547,6 @@ func IsDownloading(c echo.Context) error {
 	if IsOfflineDownloadRunning() {
 		return c.NoContent(http.StatusOK)
 	}
-
-	c.Response().Header().Add("HX-Trigger", "kiosk-new-offline-asset")
 
 	return Render(c, http.StatusOK, partials.DownloadingStatus(false))
 }

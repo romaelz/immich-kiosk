@@ -8,6 +8,7 @@ import {
     toggleFullscreen,
 } from "./fullscreen";
 import fullyKiosk from "./fullykiosk";
+import { livePhoto } from "./live-photo";
 import {
     disableAssetNavigationButtons,
     enableAssetNavigationButtons,
@@ -45,14 +46,6 @@ interface HTMXEvent extends Event {
 
 /**
  * Configuration data for managing the kiosk display and behavior
- *
- * Provides options for:
- * - Debug settings and version info
- * - Language and localization
- * - Screen refresh and display settings
- * - Date/time formatting preferences
- * - UI elements visibility control
- * - Transition animations
  */
 type KioskData = {
     debug: boolean;
@@ -60,7 +53,7 @@ type KioskData = {
     version: string;
     langCode: string;
     params: Record<string, unknown>;
-    refresh: number;
+    duration: number;
     disableNavigation: boolean;
     disableScreensaver: boolean;
     showDate: boolean;
@@ -71,6 +64,10 @@ type KioskData = {
     transition: string;
     showMoreInfo: boolean;
     showRedirects: boolean;
+    livePhotos: boolean;
+    livePhotoLoopDelay: number;
+    burnInInterval: number;
+    burnInDuration: number;
     httpTimeout: number;
 };
 
@@ -84,8 +81,8 @@ const kioskData: KioskData = JSON.parse(
     document.getElementById("kiosk-data")?.textContent || "{}",
 );
 
-// Set polling interval based on the refresh rate in kiosk data
-const pollInterval = htmx.parseInterval(`${kioskData.refresh}s`);
+// Set polling interval based on the duration rate in kiosk data
+const pollInterval = htmx.parseInterval(`${kioskData.duration}s`);
 
 // Cache DOM elements for better performance
 const documentBody = document.body;
@@ -120,6 +117,8 @@ const linksButton = htmx.find(".navigation--links") as HTMLElement | null;
 const offlineSVG = htmx.find("#offline") as HTMLElement | null;
 
 let requestInFlight = false;
+
+let burnInTimerId: number | null = null;
 
 /**
  * Initialize Kiosk functionality
@@ -200,6 +199,35 @@ async function init(): Promise<void> {
     );
 
     addEventListeners();
+
+    if (kioskData.livePhotos) livePhoto(kioskData.livePhotoLoopDelay);
+
+    // Burn-in prevention
+    if (kioskData.burnInInterval > 0 && kioskData.burnInDuration > 0)
+        burnInCycle();
+}
+
+function burnInCycle() {
+    if (burnInTimerId !== null) {
+        clearTimeout(burnInTimerId);
+        burnInTimerId = null;
+    }
+    const runBurnInCycle = () => {
+        document.body.classList.add("burn-in-dim");
+        console.debug("Burn-in cycle started");
+
+        setTimeout(() => {
+            document.body.classList.remove("burn-in-dim");
+            console.debug("Burn-in cycle ended");
+
+            burnInTimerId = setTimeout(
+                runBurnInCycle,
+                kioskData.burnInInterval * 1000,
+            );
+        }, kioskData.burnInDuration * 1000);
+    };
+
+    burnInTimerId = setTimeout(runBurnInCycle, kioskData.burnInInterval * 1000);
 }
 
 /**
@@ -388,7 +416,9 @@ function addEventListeners(): void {
 async function cleanupFrames(): Promise<void> {
     const kioskScripts = htmx.findAll(kiosk as HTMLElement, "script");
     if (kioskScripts?.length) {
-        kioskScripts.forEach((s) => htmx.remove(s, 1000));
+        kioskScripts.forEach((s) => {
+            htmx.remove(s, 1000);
+        });
     }
 
     const frames = htmx.findAll(".frame");

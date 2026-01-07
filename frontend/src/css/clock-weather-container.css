@@ -3,14 +3,21 @@
     display: flex;
     flex-direction: row;
     justify-content: space-between;
-    width: 100vw;
-    min-width: 100vw;
+    width: 100%;
+    min-width: 100%;
     height: auto;
     min-height: auto;
     top: 0;
     left: 0;
 
     z-index: var(--z-clock);
+
+    transition: opacity var(--burn-in-fade) ease-in-out;
+    opacity: 1;
+}
+
+.burn-in-dim #clock-weather-container {
+    opacity: var(--burn-in-opacity);
 }
 
 .polling-paused.more-info,

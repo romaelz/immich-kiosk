@@ -56,7 +56,7 @@ func (a *Asset) AllTags(requestID, deviceID string) (Tags, string, error) {
 	}
 
 	immichAPICall := withImmichAPICache(a.immichAPICall, requestID, deviceID, a.requestConfig, tags)
-	body, err := immichAPICall(a.ctx, http.MethodGet, apiURL.String(), nil)
+	body, _, err := immichAPICall(a.ctx, http.MethodGet, apiURL.String(), nil)
 	if err != nil {
 		return immichAPIFail(tags, err, body, apiURL.String())
 	}
@@ -74,12 +74,12 @@ func (a *Asset) AllTags(requestID, deviceID string) (Tags, string, error) {
 // The requestID and deviceID are used for caching and logging purposes.
 func (a *Asset) AssetsWithTagCount(tagID string, requestID, deviceID string) (int, error) {
 
-	var allAssetsCount int
+	var totalAssetsCount int
 
 	u, err := url.Parse(a.requestConfig.ImmichURL)
 	if err != nil {
-		_, _, err = immichAPIFail(allAssetsCount, err, nil, "")
-		return allAssetsCount, err
+		_, _, err = immichAPIFail(totalAssetsCount, err, nil, "")
+		return totalAssetsCount, err
 	}
 
 	requestBody := SearchRandomBody{
@@ -90,15 +90,25 @@ func (a *Asset) AssetsWithTagCount(tagID string, requestID, deviceID string) (in
 		Size:       a.requestConfig.Kiosk.FetchedAssetsSize,
 	}
 
+	// Include videos if show videos is enabled
+	if a.requestConfig.ShowVideos {
+		requestBody.Type = ""
+	}
+
 	if a.requestConfig.ShowArchived {
 		requestBody.WithArchived = true
 	}
 
 	DateFilter(&requestBody, a.requestConfig.DateFilter)
 
-	allAssetsCount, err = a.fetchPaginatedMetadata(u, requestBody, requestID, deviceID)
+	allAssetsCount, assetsErr := a.fetchPaginatedMetadata(u, requestBody, requestID, deviceID)
+	if assetsErr != nil {
+		return totalAssetsCount, assetsErr
+	}
 
-	return allAssetsCount, err
+	totalAssetsCount += allAssetsCount
+
+	return totalAssetsCount, nil
 }
 
 // AssetsWithTag retrieves assets that have the specified tag from the Immich API.
@@ -120,6 +130,11 @@ func (a *Asset) AssetsWithTag(tagID string, requestID, deviceID string) ([]Asset
 		WithExif:   true,
 		WithPeople: true,
 		Size:       a.requestConfig.Kiosk.FetchedAssetsSize,
+	}
+
+	// Include videos if show videos is enabled
+	if a.requestConfig.ShowVideos {
+		requestBody.Type = ""
 	}
 
 	if a.requestConfig.ShowArchived {
@@ -144,7 +159,7 @@ func (a *Asset) AssetsWithTag(tagID string, requestID, deviceID string) ([]Asset
 	}
 
 	immichAPICall := withImmichAPICache(a.immichAPICall, requestID, deviceID, a.requestConfig, immichAssets)
-	apiBody, err := immichAPICall(a.ctx, http.MethodPost, apiURL.String(), jsonBody)
+	apiBody, _, err := immichAPICall(a.ctx, http.MethodPost, apiURL.String(), jsonBody)
 	if err != nil {
 		return immichAPIFail(immichAssets, err, nil, apiURL.String())
 	}
@@ -165,9 +180,9 @@ func (a *Asset) AssetsWithTag(tagID string, requestID, deviceID string) ([]Asset
 func (a *Asset) RandomAssetWithTag(tagID string, requestID, deviceID string, isPrefetch bool) error {
 
 	if isPrefetch {
-		log.Debug(requestID, "PREFETCH", deviceID, "Getting Random image with tag", tagID)
+		log.Debug(requestID, "PREFETCH", deviceID, "Getting Random asset with tag", "ID", tagID)
 	} else {
-		log.Debug(requestID+" Getting Random image with tag", tagID)
+		log.Debug(requestID+" Getting Random asset with tag", "ID", tagID)
 	}
 
 	for range MaxRetries {
@@ -180,7 +195,7 @@ func (a *Asset) RandomAssetWithTag(tagID string, requestID, deviceID string, isP
 		apiCacheKey := cache.APICacheKey(apiURL, deviceID, a.requestConfig.SelectedUser)
 
 		if len(immichAssets) == 0 {
-			log.Debug(requestID + " No images left in cache. Refreshing and trying again")
+			log.Debug(requestID + " No assets left in cache. Refreshing and trying again")
 			cache.Delete(apiCacheKey)
 
 			immichAssetsRetry, _, retryErr := a.AssetsWithTag(tagID, requestID, deviceID)
@@ -188,7 +203,12 @@ func (a *Asset) RandomAssetWithTag(tagID string, requestID, deviceID string, isP
 				return fmt.Errorf("no assets found with tag %s after refresh", tagID)
 			}
 
-			continue
+			immichAssets = immichAssetsRetry
+		}
+
+		wantedAssetType := ImageOnlyAssetTypes
+		if a.requestConfig.ShowVideos {
+			wantedAssetType = AllAssetTypes
 		}
 
 		for immichAssetIndex, asset := range immichAssets {
@@ -197,12 +217,12 @@ func (a *Asset) RandomAssetWithTag(tagID string, requestID, deviceID string, isP
 			asset.requestConfig = a.requestConfig
 			asset.ctx = a.ctx
 
-			if !asset.isValidAsset(requestID, deviceID, ImageOnlyAssetTypes, a.RatioWanted) {
+			if !asset.isValidAsset(requestID, deviceID, wantedAssetType, a.RatioWanted) {
 				continue
 			}
 
 			if a.requestConfig.Kiosk.Cache {
-				// Remove the current image from the slice
+				// Remove the current asset from the slice
 				immichAssetsToCache := slices.Delete(immichAssets, immichAssetIndex, immichAssetIndex+1)
 				jsonBytes, cacheMarshalErr := json.Marshal(immichAssetsToCache)
 				if cacheMarshalErr != nil {
@@ -210,11 +230,8 @@ func (a *Asset) RandomAssetWithTag(tagID string, requestID, deviceID string, isP
 					return cacheMarshalErr
 				}
 
-				// replace cache with used image(s) removed
-				cacheErr := cache.Replace(apiCacheKey, jsonBytes)
-				if cacheErr != nil {
-					log.Debug("Failed to update device cache for tag", "tagID", tagID, "deviceID", deviceID)
-				}
+				// replace cache with used asset(s) removed
+				cache.Set(apiCacheKey, jsonBytes, a.requestConfig.Duration)
 			}
 
 			asset.BucketID = tagID
@@ -224,11 +241,11 @@ func (a *Asset) RandomAssetWithTag(tagID string, requestID, deviceID string, isP
 			return nil
 		}
 
-		log.Debug(requestID + " No viable images left in cache. Refreshing and trying again")
+		log.Debug(requestID + " No viable assets left in cache. Refreshing and trying again")
 		cache.Delete(apiCacheKey)
 	}
 
-	return fmt.Errorf("no images found for '%s'. Max retries reached", tagID)
+	return fmt.Errorf("no assets found for '%s'. Max retries reached", tagID)
 }
 
 func (a *Asset) HasTag(tagID string) bool {
@@ -305,7 +322,7 @@ func (a *Asset) upsertTag(tag Tag) (Tag, error) {
 		return createdTag, fmt.Errorf("marshaling request body: %w", marshalErr)
 	}
 
-	apiBody, resErr := a.immichAPICall(a.ctx, http.MethodPut, apiURL.String(), jsonBody)
+	apiBody, _, resErr := a.immichAPICall(a.ctx, http.MethodPut, apiURL.String(), jsonBody)
 	if resErr != nil {
 		_, _, resErr = immichAPIFail(response, resErr, apiBody, apiURL.String())
 		log.Error("api call failed while creating tag", "error", resErr)
@@ -367,7 +384,7 @@ func (a *Asset) modifyTagAsset(tag Tag, assetID string, method string, action st
 		return fmt.Errorf("marshaling request body: %w", marshalErr)
 	}
 
-	apiBody, resErr := a.immichAPICall(a.ctx, method, apiURL.String(), jsonBody)
+	apiBody, _, resErr := a.immichAPICall(a.ctx, method, apiURL.String(), jsonBody)
 	if resErr != nil {
 		_, _, resErr = immichAPIFail(response, resErr, apiBody, apiURL.String())
 		log.Error("api failed to "+action+" tag to asset", "error", resErr)

@@ -18,18 +18,29 @@ import (
 
 type WebhookEvent string
 
+func (e WebhookEvent) String() string {
+	return string(e)
+}
+
 const (
-	NewAsset                      WebhookEvent = "asset.new"
-	NextHistoryAsset              WebhookEvent = "asset.history.next"
-	PreviousHistoryAsset          WebhookEvent = "asset.history.previous"
-	PrefetchAsset                 WebhookEvent = "asset.prefetch"
-	CacheFlush                    WebhookEvent = "cache.flush"
-	UserInteractionClick          WebhookEvent = "user.interaction.click"
+	NewAsset             WebhookEvent = "asset.new"
+	NextHistoryAsset     WebhookEvent = "asset.history.next"
+	PreviousHistoryAsset WebhookEvent = "asset.history.previous"
+	PrefetchAsset        WebhookEvent = "asset.prefetch"
+	CacheFlush           WebhookEvent = "cache.flush"
+
+	// UserInteractionClick          WebhookEvent = "user.interaction.click"
 	UserWebhookTriggerInfoOverlay WebhookEvent = "user.webhook.trigger.info_overlay"
 	UserLikeInfoOverlay           WebhookEvent = "user.like.info_overlay"
 	UserUnlikeInfoOverlay         WebhookEvent = "user.unlike.info_overlay"
 	UserHideInfoOverlay           WebhookEvent = "user.hide.info_overlay"
 	UserUnhideInfoOverlay         WebhookEvent = "user.unhide.info_overlay"
+	UserNavigationCustom          WebhookEvent = "user.navigation.custom"
+
+	// Offline mode
+	NewOfflineAsset             WebhookEvent = "asset.offline.new"
+	NextHistoryOfflineAsset     WebhookEvent = "asset.offline.history.next"
+	PreviousHistoryOfflineAsset WebhookEvent = "asset.offline.history.previous"
 )
 
 type Meta struct {
@@ -38,14 +49,14 @@ type Meta struct {
 }
 
 type Payload struct {
+	Meta       Meta           `json:"meta"`
 	Event      string         `json:"event"`
 	Timestamp  string         `json:"timestamp"`
 	DeviceID   string         `json:"deviceID"`
 	ClientName string         `json:"clientName"`
-	AssetCount int            `json:"assetCount"`
 	Assets     []immich.Asset `json:"assets"`
 	Config     config.Config  `json:"config"`
-	Meta       Meta           `json:"meta"`
+	AssetCount int            `json:"assetCount"`
 }
 
 // newHTTPClient creates a new HTTP client with the specified timeout duration.

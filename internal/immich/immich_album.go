@@ -72,13 +72,13 @@ func (a *Asset) albums(requestID, deviceID string, shared bool, contains string,
 	var body []byte
 
 	if bypassCache {
-		body, err = a.immichAPICall(a.ctx, http.MethodGet, apiURL.String(), nil)
+		body, _, err = a.immichAPICall(a.ctx, http.MethodGet, apiURL.String(), nil)
 		if err != nil {
 			return immichAPIFail(albums, err, body, apiURL.String())
 		}
 	} else {
 		immichAPICall := withImmichAPICache(a.immichAPICall, requestID, deviceID, a.requestConfig, albums)
-		body, err = immichAPICall(a.ctx, http.MethodGet, apiURL.String(), nil)
+		body, _, err = immichAPICall(a.ctx, http.MethodGet, apiURL.String(), nil)
 		if err != nil {
 			return immichAPIFail(albums, err, body, apiURL.String())
 		}
@@ -117,6 +117,11 @@ func (a *Asset) allAlbums(requestID, deviceID string) (Albums, string, error) {
 	return all, ownedURL + " && " + sharedURL, err
 }
 
+func (a *Asset) AllAlbums(requestID, deviceID string) (Albums, error) {
+	all, _, err := a.allAlbums(requestID, deviceID)
+	return all, err
+}
+
 // allOwnedAlbums retrieves all non-shared albums from Immich.
 func (a *Asset) allOwnedAlbums(requestID, deviceID string) (Albums, string, error) {
 	return a.albums(requestID, deviceID, false, "", false)
@@ -147,7 +152,7 @@ func (a *Asset) albumAssets(albumID, requestID, deviceID string) (Album, string,
 	}
 
 	immichAPICall := withImmichAPICache(a.immichAPICall, requestID, deviceID, a.requestConfig, album)
-	body, err := immichAPICall(a.ctx, http.MethodGet, apiURL.String(), nil)
+	body, _, err := immichAPICall(a.ctx, http.MethodGet, apiURL.String(), nil)
 	if err != nil {
 		return immichAPIFail(album, err, body, apiURL.String())
 	}
@@ -208,11 +213,11 @@ func (a *Asset) AlbumImageCount(albumID string, requestID, deviceID string) (int
 		return countAssetsInAlbums(albums), nil
 
 	case kiosk.AlbumKeywordFavourites, kiosk.AlbumKeywordFavorites:
-		favouriteImagesCount, err := a.favouriteImagesCount(requestID, deviceID)
+		favouriteAssetCount, err := a.favouriteAssetsCount(requestID, deviceID)
 		if err != nil {
-			return 0, fmt.Errorf("failed to get favorite images: %w", err)
+			return 0, fmt.Errorf("failed to get favorite assets: %w", err)
 		}
-		return favouriteImagesCount, nil
+		return favouriteAssetCount, nil
 
 	default:
 		album, _, err := a.albumAssets(albumID, requestID, deviceID)
@@ -235,7 +240,7 @@ func (a *Asset) AlbumImageCount(albumID string, requestID, deviceID string) (int
 //   - isPrefetch: Whether this is a prefetch request for caching
 //
 // Returns:
-//   - error: Any error encountered during the asset retrieval process, including when no viable images are found
+//   - error: Any error encountered during the asset retrieval process, including when No viable assets are found
 //     after maximum retry attempts
 func (a *Asset) AssetFromAlbum(albumID string, albumAssetsOrder AssetOrder, requestID, deviceID string) error {
 
@@ -249,11 +254,11 @@ func (a *Asset) AssetFromAlbum(albumID string, albumAssetsOrder AssetOrder, requ
 		apiCacheKey := cache.APICacheKey(apiURL, deviceID, a.requestConfig.SelectedUser)
 
 		if len(album.Assets) == 0 {
-			log.Debug(requestID+" No images left in cache. Refreshing and trying again for album", albumID)
+			log.Debug(requestID+" No assets left in cache. Refreshing and trying again for album", albumID)
 			cache.Delete(apiCacheKey)
 
-			a, _, retryErr := a.albumAssets(albumID, requestID, deviceID)
-			if retryErr != nil || len(a.Assets) == 0 {
+			al, _, retryErr := a.albumAssets(albumID, requestID, deviceID)
+			if retryErr != nil || len(al.Assets) == 0 {
 				return fmt.Errorf("no assets found for album %s after refresh", albumID)
 			}
 
@@ -275,7 +280,7 @@ func (a *Asset) AssetFromAlbum(albumID string, albumAssetsOrder AssetOrder, requ
 
 		allowedTypes := ImageOnlyAssetTypes
 
-		if a.requestConfig.ExperimentalAlbumVideo {
+		if a.requestConfig.ShowVideos {
 			allowedTypes = AllAssetTypes
 		}
 
@@ -300,10 +305,7 @@ func (a *Asset) AssetFromAlbum(albumID string, albumAssetsOrder AssetOrder, requ
 				}
 
 				// replace with cache minus used asset
-				cacheErr := cache.Replace(apiCacheKey, jsonBytes)
-				if cacheErr != nil {
-					log.Debug("Failed to update device cache for album", "albumID", albumID, "deviceID", deviceID)
-				}
+				cache.Set(apiCacheKey, jsonBytes, a.requestConfig.Duration)
 			}
 
 			asset.BucketID = album.ID
@@ -313,11 +315,11 @@ func (a *Asset) AssetFromAlbum(albumID string, albumAssetsOrder AssetOrder, requ
 			return nil
 		}
 
-		log.Debug(requestID + " No viable images left in cache. Refreshing and trying again")
+		log.Debug(requestID + " No viable assets left in cache. Refreshing and trying again")
 		cache.Delete(apiCacheKey)
 	}
 
-	return fmt.Errorf("no images found for '%s'. Max retries reached", albumID)
+	return fmt.Errorf("no assets found for '%s'. Max retries reached", albumID)
 }
 
 // selectRandomAlbum selects a random album from the given list of albums, excluding specific albums.
@@ -467,7 +469,7 @@ func (a *Asset) createKioskLikedAlbum() (string, error) {
 		return "", fmt.Errorf("marshaling request body: %w", marshalErr)
 	}
 
-	body, err := a.immichAPICall(a.ctx, http.MethodPost, apiURL.String(), jsonBody)
+	body, _, err := a.immichAPICall(a.ctx, http.MethodPost, apiURL.String(), jsonBody)
 	if err != nil {
 		_, _, resErr := immichAPIFail(res, err, body, apiURL.String())
 		return "", resErr
@@ -552,7 +554,7 @@ func (a *Asset) modifyAssetInAlbum(albumID string, method string) error {
 		return fmt.Errorf("marshaling request body: %w", marshalErr)
 	}
 
-	body, err := a.immichAPICall(a.ctx, method, apiURL.String(), jsonBody)
+	body, _, err := a.immichAPICall(a.ctx, method, apiURL.String(), jsonBody)
 	if err != nil {
 		_, _, err = immichAPIFail(res, err, body, apiURL.String())
 		return err

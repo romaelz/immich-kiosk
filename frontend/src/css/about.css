@@ -1,5 +1,6 @@
 body#about {
     overflow: auto;
+    max-height: none;
 }
 
 .about-container {
@@ -49,7 +50,7 @@ body#about {
     margin: 1rem auto;
 }
 
-.content {
+.about_content {
     position: relative;
     background-color: white;
     border-radius: 1rem;

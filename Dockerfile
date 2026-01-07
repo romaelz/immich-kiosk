@@ -14,10 +14,10 @@ RUN --mount=type=cache,id=pnpm,target=/pnpm/store pnpm install --prod --frozen-l
 # Frontend Build
 FROM frontend-base AS frontend-build
 RUN --mount=type=cache,id=pnpm,target=/pnpm/store pnpm install --frozen-lockfile
-RUN pnpm css && pnpm js
+RUN pnpm css && pnpm js && pnpm url-builder
 
 # Go Builder
-FROM --platform=$BUILDPLATFORM golang:1.24.4-alpine AS build
+FROM --platform=$BUILDPLATFORM golang:1.25.5-bookworm AS build
 
 ARG VERSION=0.21.6
 ARG TARGETOS
@@ -27,7 +27,7 @@ WORKDIR /app
 
 COPY . .
 COPY --from=frontend-build /app/frontend/public/assets/css /app/frontend/public/assets/css
-COPY --from=frontend-build /app/frontend/public/assets/js/kiosk.js /app/frontend/public/assets/js/kiosk.js
+COPY --from=frontend-build /app/frontend/public/assets/js/ /app/frontend/public/assets/js/
 
 RUN go mod download
 RUN go tool templ generate
@@ -35,7 +35,7 @@ RUN go tool templ generate
 RUN CGO_ENABLED=0 GOOS=$TARGETOS GOARCH=$TARGETARCH go build -a -installsuffix cgo -ldflags "-X main.version=${VERSION}" -o dist/kiosk .
 
 # Release
-FROM alpine:latest
+FROM alpine:3.22.2
 
 ENV TZ=Europe/London
 
@@ -43,7 +43,7 @@ ENV TERM=xterm-256color
 ENV DEBUG_COLORS=true
 ENV COLORTERM=truecolor
 
-RUN apk update && apk add --no-cache tzdata ca-certificates && update-ca-certificates
+RUN apk add --no-cache tzdata ca-certificates curl && update-ca-certificates
 
 WORKDIR /
 

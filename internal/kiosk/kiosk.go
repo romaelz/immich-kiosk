@@ -1,8 +1,17 @@
+// kiosk constants
 package kiosk
+
+import "github.com/charmbracelet/lipgloss"
 
 type Source string
 
 const (
+	GlobalCache = "kiosk-cache"
+
+	ConfigValidationWarning string = "warning"
+	ConfigValidationError   string = "error"
+	ConfigValidationOff     string = "off"
+
 	AlbumKeywordAll        string = "all"
 	AlbumKeywordOwned      string = "owned"
 	AlbumKeywordShared     string = "shared"
@@ -41,4 +50,11 @@ const (
 
 	HistoryIndicator string = "*"
 	HistoryLimit     int    = 20
+
+	ThemeFade   string = "fade"
+	ThemeSolid  string = "solid"
+	ThemeBubble string = "bubble"
+	ThemeBlur   string = "blur"
 )
+
+var DebugID = lipgloss.NewStyle().Bold(true).Padding(0, 1).Foreground(lipgloss.Color("#000000")).Background(lipgloss.Color("#1ed2bb")).Render("KIOSK")

@@ -12,6 +12,7 @@ import (
 
 	"github.com/damongolding/immich-kiosk/internal/common"
 	"github.com/damongolding/immich-kiosk/internal/config"
+	"github.com/damongolding/immich-kiosk/internal/i18n"
 	"github.com/damongolding/immich-kiosk/internal/immich"
 	"github.com/damongolding/immich-kiosk/internal/kiosk"
 	imageComponent "github.com/damongolding/immich-kiosk/internal/templates/components/image"
@@ -73,7 +74,8 @@ func NewAsset(baseConfig *config.Config, com *common.Common) echo.HandlerFunc {
 
 		viewData, err := generateViewData(requestConfig, requestCtx, requestID, deviceID, false)
 		if err != nil {
-			return RenderError(c, err, "retrieving asset", requestConfig.Refresh)
+			t := i18n.T()
+			return RenderError(c, err, t("retrieving_asset"), requestConfig.Duration)
 		}
 
 		if requestConfig.Kiosk.PreFetch {
@@ -82,7 +84,7 @@ func NewAsset(baseConfig *config.Config, com *common.Common) echo.HandlerFunc {
 
 		go webhooks.Trigger(com.Context(), requestData, KioskVersion, webhooks.NewAsset, viewData)
 
-		if len(viewData.Assets) > 0 && requestConfig.ExperimentalAlbumVideo && viewData.Assets[0].ImmichAsset.Type == immich.VideoType {
+		if len(viewData.Assets) > 0 && requestConfig.ShowVideos && viewData.Assets[0].ImmichAsset.Type == immich.VideoType {
 			return Render(c, http.StatusOK, videoComponent.Video(viewData, com.Secret()))
 		}
 
@@ -109,6 +111,8 @@ func Image(baseConfig *config.Config, com *common.Common) echo.HandlerFunc {
 		requestConfig := requestData.RequestConfig
 		requestID := requestData.RequestID
 
+		layout := strings.ToLower(strings.TrimSpace(c.QueryParam("layout")))
+
 		log.Debug(
 			requestID,
 			"method", c.Request().Method,
@@ -118,7 +122,15 @@ func Image(baseConfig *config.Config, com *common.Common) echo.HandlerFunc {
 
 		immichAsset := immich.New(com.Context(), requestConfig)
 
-		img, err := processAsset(&immichAsset, immich.ImageOnlyAssetTypes, requestConfig, requestID, "", "", false)
+		switch layout {
+		case kiosk.PortraitOrientation:
+			immichAsset.RatioWanted = immich.PortraitOrientation
+		case kiosk.LandscapeOrientation:
+			immichAsset.RatioWanted = immich.LandscapeOrientation
+		default:
+		}
+
+		img, err := processAsset(&immichAsset, requestConfig, requestID, "", "", false)
 		if err != nil {
 			return err
 		}
@@ -161,8 +173,8 @@ func ImageWithReload(baseConfig *config.Config) echo.HandlerFunc {
 	}
 }
 
-// ImageWithID returns an echo.HandlerFunc that handles requests for images by ID.
-// It retrieves the image preview based on the provided imageID and returns it as a blob with the appropriate MIME type.
+// ImageWithID handles HTTP requests to retrieve an image preview by its image ID and returns the image as a blob with the correct MIME type.
+// Returns HTTP 400 if the image ID is missing or if the image cannot be retrieved.
 func ImageWithID(baseConfig *config.Config, com *common.Common) echo.HandlerFunc {
 	return func(c echo.Context) error {
 
@@ -196,7 +208,7 @@ func ImageWithID(baseConfig *config.Config, com *common.Common) echo.HandlerFunc
 			}
 		}
 
-		imgBytes, previewErr := immichAsset.ImagePreview()
+		imgBytes, _, previewErr := immichAsset.ImagePreview()
 		if previewErr != nil {
 			return echo.NewHTTPError(http.StatusBadRequest, "unable to retrieve image")
 		}
@@ -298,6 +310,9 @@ func LikeAsset(baseConfig *config.Config, com *common.Common, setAssetAsLiked bo
 		)
 
 		assetID := c.FormValue("assetID")
+		if u := strings.TrimSpace(c.FormValue("user")); u != "" {
+			requestConfig.SelectedUser = u
+		}
 
 		if assetID == "" {
 			log.Error("Asset ID is required")
@@ -386,6 +401,9 @@ func HideAsset(baseConfig *config.Config, com *common.Common, hideAsset bool) ec
 
 		assetID := c.FormValue("assetID")
 		tagName := c.FormValue("tagName")
+		if u := strings.TrimSpace(c.FormValue("user")); u != "" {
+			requestConfig.SelectedUser = u
+		}
 
 		if assetID == "" {
 			log.Error("Asset ID is required")

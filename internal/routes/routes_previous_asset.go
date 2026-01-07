@@ -2,17 +2,20 @@ package routes
 
 import (
 	"fmt"
+	"image/color"
 	"net/http"
 	"path"
 	"strings"
 	"sync"
 
 	"github.com/charmbracelet/log"
+	"github.com/dustin/go-humanize"
 	"github.com/labstack/echo/v4"
 	"golang.org/x/sync/errgroup"
 
 	"github.com/damongolding/immich-kiosk/internal/common"
 	"github.com/damongolding/immich-kiosk/internal/config"
+	"github.com/damongolding/immich-kiosk/internal/i18n"
 	"github.com/damongolding/immich-kiosk/internal/immich"
 	"github.com/damongolding/immich-kiosk/internal/kiosk"
 	imageComponent "github.com/damongolding/immich-kiosk/internal/templates/components/image"
@@ -52,17 +55,9 @@ func NextHistoryAsset(baseConfig *config.Config, com *common.Common, c echo.Cont
 	return historyAsset(baseConfig, com, c, true)
 }
 
-// historyAsset handles the core logic for showing previous/next assets from navigation history.
-// It retrieves the requested asset(s), processes images and metadata in parallel, and renders
-// the appropriate view component.
-//
-// Parameters:
-// - baseConfig: Application configuration
-// - com: Common functionality and context
-// - c: Echo context for the HTTP request
-// - useNextImage: If true, shows next asset, if false shows previous
-//
-// Returns error if asset processing fails.
+// historyAsset processes and displays either the previous or next asset(s) from the navigation history, handling both online and offline modes.
+// It retrieves the relevant history entry, fetches asset metadata and image previews concurrently, and prepares view data for rendering. If offline mode is enabled, it loads cached asset data instead. The function triggers a webhook event corresponding to the navigation direction and renders either an image or video component based on the asset type.
+// Returns an error if asset retrieval, image processing, or view rendering fails.
 func historyAsset(baseConfig *config.Config, com *common.Common, c echo.Context, useNextImage bool) error {
 	requestData, err := InitializeRequestData(c, baseConfig)
 	if err != nil {
@@ -112,7 +107,12 @@ func historyAsset(baseConfig *config.Config, com *common.Common, c echo.Context,
 	requestConfig.History[entryIndex] = kiosk.HistoryIndicator + requestConfig.History[entryIndex]
 
 	if requestConfig.UseOfflineMode && requestConfig.OfflineMode.Enabled {
-		return historyAssetOffline(c, requestID, deviceID, wantedAssets, requestConfig.History, com.Secret())
+		webhookEvent := webhooks.PreviousHistoryOfflineAsset
+		if useNextImage {
+			webhookEvent = webhooks.NextHistoryOfflineAsset
+		}
+
+		return historyAssetOffline(c, requestData, wantedAssets, requestConfig, com, webhookEvent)
 	}
 
 	viewData := common.ViewData{
@@ -135,84 +135,14 @@ func historyAsset(baseConfig *config.Config, com *common.Common, c echo.Context,
 
 		prevAssetsID, currentAssetID, selectedUser := i, parts[0], parts[1]
 
-		g.Go(func(prevAssetsID int, currentAssetID string) func() error {
-			return func() error {
-				requestConfig.SelectedUser = selectedUser
-
-				asset := immich.New(com.Context(), requestConfig)
-				asset.ID = currentAssetID
-
-				var wg sync.WaitGroup
-				wg.Add(1)
-
-				go func(asset *immich.Asset, requestID string, wg *sync.WaitGroup) {
-					defer wg.Done()
-					var processingErr error
-
-					if assetInfoErr := asset.AssetInfo(requestID, deviceID); assetInfoErr != nil {
-						processingErr = fmt.Errorf("failed to get asset info: %w", assetInfoErr)
-						log.Error(processingErr)
-					}
-
-					asset.AddRatio()
-
-					if requestConfig.ShowAlbumName {
-						asset.AlbumsThatContainAsset(requestID, deviceID)
-					}
-
-				}(&asset, requestID, &wg)
-
-				var imgString, imgBlurString string
-
-				defer func() {
-					viewData.Assets[prevAssetsID] = common.ViewImageData{
-						ImmichAsset:   asset,
-						ImageData:     imgString,
-						ImageBlurData: imgBlurString,
-						User:          selectedUser,
-					}
-				}()
-
-				// Image processing isn't required for video, audio, or other types
-				// So if this fails, we can still proceed with the asset view
-				imgBytes, previewErr := asset.ImagePreview()
-				if previewErr != nil {
-					switch asset.Type {
-					case immich.ImageType:
-						return fmt.Errorf("retrieving asset: %w", previewErr)
-
-					case immich.VideoType, immich.AudioType, immich.OtherType:
-						wg.Wait()
-						return nil
-					}
-				}
-
-				img, byteErr := utils.BytesToImage(imgBytes)
-				if byteErr != nil {
-					return byteErr
-				}
-
-				imgString, base64Err := imageToBase64(img, requestConfig, requestID, deviceID, "Converted", false)
-				if base64Err != nil {
-					return fmt.Errorf("converting image to base64: %w", base64Err)
-				}
-
-				imgBlurString, blurErr := processBlurredImage(img, asset.Type, requestConfig, requestID, deviceID, false)
-				if blurErr != nil {
-					return fmt.Errorf("converting blurred image to base64: %w", blurErr)
-				}
-
-				wg.Wait()
-
-				return nil
-			}
-		}(prevAssetsID, currentAssetID))
+		g.Go(getHistoryAsset(requestConfig, com, requestID, deviceID, selectedUser, &viewData, prevAssetsID, currentAssetID))
 	}
 
 	// Wait for all goroutines to complete and check for errors
 	errGroupWait := g.Wait()
 	if errGroupWait != nil {
-		return RenderError(c, errGroupWait, "processing images", requestConfig.Refresh)
+		t := i18n.T()
+		return RenderError(c, errGroupWait, t("processing_images"), requestConfig.Duration)
 	}
 
 	webhookEvent := webhooks.PreviousHistoryAsset
@@ -227,6 +157,100 @@ func historyAsset(baseConfig *config.Config, com *common.Common, c echo.Context,
 	}
 
 	return Render(c, http.StatusOK, imageComponent.Image(viewData, com.Secret()))
+}
+
+// getHistoryAsset returns a function that processes a single asset from the navigation history.
+// It fetches asset metadata, album details (if configured), and generates regular and blurred preview images.
+// The function is intended to be run as a goroutine (via errgroup) for each asset in the history entry.
+func getHistoryAsset(requestConfig config.Config, com *common.Common, requestID, deviceID, selectedUser string, viewData *common.ViewData, prevAssetsID int, currentAssetID string) func() error {
+	return func() error {
+		requestConfig.SelectedUser = selectedUser
+
+		asset := immich.New(com.Context(), requestConfig)
+		asset.ID = currentAssetID
+		if requestConfig.Memories {
+			if ok, memory, assetIndex := asset.IsMemory(); ok {
+				asset.Bucket = kiosk.SourceMemories
+				asset.MemoryTitle = humanize.Time(memory.Assets[assetIndex].LocalDateTime)
+			}
+		}
+
+		var wg sync.WaitGroup
+		wg.Add(1)
+
+		// Fetch asset info and album details in a goroutine.
+		go func(asset *immich.Asset, requestID string, wg *sync.WaitGroup) {
+			defer wg.Done()
+			var processingErr error
+
+			if assetInfoErr := asset.AssetInfo(requestID, deviceID); assetInfoErr != nil {
+				processingErr = fmt.Errorf("failed to get asset info: %w", assetInfoErr)
+				log.Error(processingErr)
+			}
+
+			asset.AddRatio()
+
+			if requestConfig.ShowAlbumName {
+				asset.AlbumsThatContainAsset(requestID, deviceID)
+			}
+
+		}(&asset, requestID, &wg)
+
+		var imgString, imgBlurString string
+		var dominantColor color.RGBA
+		var err error
+
+		// Populate the viewData.Assets entry for this asset after processing.
+		defer func() {
+			viewData.Assets[prevAssetsID] = common.ViewImageData{
+				ImmichAsset:        asset,
+				ImageData:          imgString,
+				ImageBlurData:      imgBlurString,
+				ImageDominantColor: dominantColor,
+				User:               selectedUser,
+			}
+		}()
+
+		// Image processing isn't required for video, audio, or other types.
+		// If preview fails for an image, return error; for other types, proceed.
+		imgBytes, _, previewErr := asset.ImagePreview()
+		if previewErr != nil {
+			switch asset.Type {
+			case immich.ImageType:
+				return fmt.Errorf("retrieving asset: %w", previewErr)
+
+			case immich.VideoType, immich.AudioType, immich.OtherType:
+				wg.Wait()
+				return nil
+			}
+		}
+
+		img, byteErr := utils.BytesToImage(imgBytes, requestConfig.UseOriginalImage)
+		if byteErr != nil {
+			return byteErr
+		}
+
+		imgString, base64Err := imageToBase64(img, requestConfig, requestID, deviceID, "Converted", false)
+		if base64Err != nil {
+			return fmt.Errorf("converting image to base64: %w", base64Err)
+		}
+
+		imgBlurString, blurErr := processBlurredImage(img, asset.Type, requestConfig, requestID, deviceID, false)
+		if blurErr != nil {
+			return fmt.Errorf("converting blurred image to base64: %w", blurErr)
+		}
+
+		if requestConfig.Theme == kiosk.ThemeBubble {
+			dominantColor, err = utils.ExtractDominantColor(img)
+			if err != nil {
+				return fmt.Errorf("extracting dominant colour: %w", err)
+			}
+		}
+
+		wg.Wait()
+
+		return nil
+	}
 }
 
 // findHistoryEntry searches through the history slice to find and return the appropriate
@@ -281,17 +305,19 @@ func findHistoryEntry(history []string, useNextImage bool) (string, int) {
 //
 // Returns:
 // - error if loading or rendering cached data fails
-func historyAssetOffline(c echo.Context, requestID, deviceID string, wantedAssets, history []string, secret string) error {
+func historyAssetOffline(c echo.Context, requestData *common.RouteRequestData, wantedAssets []string, requestConfig config.Config, com *common.Common, webhookEvent webhooks.WebhookEvent) error {
 	replacer := strings.NewReplacer(
 		kiosk.HistoryIndicator, "",
 		":", "",
 		",", "",
 	)
 
-	var filename string
+	var sb strings.Builder
 	for _, wa := range wantedAssets {
-		filename += replacer.Replace(wa)
+		sb.WriteString(replacer.Replace(wa))
 	}
+
+	filename := sb.String()
 
 	filename = generateCacheFilename(filename)
 
@@ -304,9 +330,13 @@ func historyAssetOffline(c echo.Context, requestID, deviceID string, wantedAsset
 	}
 
 	viewData.KioskVersion = KioskVersion
-	viewData.RequestID = requestID
-	viewData.DeviceID = deviceID
-	viewData.History = history
+	viewData.RequestID = requestData.RequestID
+	viewData.DeviceID = requestData.DeviceID
+	viewData.History = requestConfig.History
+	viewData.Theme = requestConfig.Theme
+	viewData.Kiosk.DemoMode = requestConfig.Kiosk.DemoMode
 
-	return Render(c, http.StatusOK, imageComponent.Image(viewData, secret))
+	go webhooks.Trigger(com.Context(), requestData, KioskVersion, webhookEvent, viewData)
+
+	return Render(c, http.StatusOK, imageComponent.Image(viewData, com.Secret()))
 }

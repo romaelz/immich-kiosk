@@ -12,6 +12,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"os"
 	"strconv"
 	"strings"
 	"time"
@@ -26,6 +27,7 @@ import (
 	"github.com/damongolding/immich-kiosk/internal/cache"
 	"github.com/damongolding/immich-kiosk/internal/common"
 	"github.com/damongolding/immich-kiosk/internal/config"
+	"github.com/damongolding/immich-kiosk/internal/i18n"
 	"github.com/damongolding/immich-kiosk/internal/immich"
 	"github.com/damongolding/immich-kiosk/internal/routes"
 	"github.com/damongolding/immich-kiosk/internal/utils"
@@ -39,16 +41,38 @@ var version string
 //go:embed frontend/public
 var public embed.FS
 
+//go:embed locales/*.toml
+var localeFS embed.FS
+
+//go:embed config.schema.json
+var SchemaJSON string
+
 func init() {
 	routes.KioskVersion = version
+	config.SchemaJSON = SchemaJSON
+	i18n.LocaleFS = localeFS
 }
 
 // main initializes and starts the Immich Kiosk web server, sets up configuration, middleware, routes, and manages graceful shutdown.
 func main() {
 
-	fmt.Println(kioskBanner)
+	var logLevel log.Level
+	setLogLevel(&logLevel)
+	log.SetLevel(logLevel)
+
+	if logLevel == log.ErrorLevel || logLevel == log.WarnLevel {
+		fmt.Println(kioskBanner)
+	} else {
+		log.Info(kioskBanner)
+	}
+
 	versionStyle := lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#5af78e")).Render
-	fmt.Print("Version ", versionStyle(version), "\n\n")
+	if logLevel == log.ErrorLevel || logLevel == log.WarnLevel {
+		fmt.Print("Version ", versionStyle(version), "\n\n")
+	} else {
+		log.Info("Version", "v", version)
+		fmt.Println()
+	}
 
 	log.SetTimeFormat("15:04:05")
 
@@ -57,9 +81,15 @@ func main() {
 	baseConfig := config.New()
 	baseConfig.Kiosk.Version = version
 
-	systemLang := monday.Locale(utils.SystemLanguage())
+	lang := utils.SystemLanguage()
+	systemLang := monday.Locale(lang)
 	baseConfig.SystemLang = systemLang
-	log.Infof("System language set as %s", systemLang)
+	log.Info("System language", "lang", systemLang)
+
+	i18nErr := i18n.Init(lang)
+	if i18nErr != nil {
+		log.Error("Failed to initialize i18n", "err", i18nErr)
+	}
 
 	configErr := baseConfig.Load()
 	if configErr != nil {
@@ -78,29 +108,27 @@ func main() {
 	videoManager, videoManagerErr := video.New(c.Context())
 	if videoManagerErr != nil {
 		log.Error("Failed to initialize video manager", "err", videoManagerErr)
+	} else {
+		videoManager.MaxAge = time.Minute * 10
+		routes.VideoManager = videoManager
 	}
 
-	videoManager.MaxAge = time.Duration(10) * time.Minute
-
-	routes.VideoManager = videoManager
-
 	if baseConfig.Kiosk.WatchConfig {
-		log.Infof("Watching %s for changes", baseConfig.V.ConfigFileUsed())
+		log.Info("Watching config for changes", "file", baseConfig.V.ConfigFileUsed())
 		baseConfig.WatchConfig(c.Context())
 	}
 
 	if baseConfig.Kiosk.Debug {
-
 		log.SetLevel(log.DebugLevel)
 		if baseConfig.Kiosk.DebugVerbose {
 			log.Debug("DEBUG VERBOSE mode on")
 		} else {
 			log.Debug("DEBUG mode on")
 		}
-
-		zone, _ := time.Now().Zone()
-		log.Debug("🕐", "current_time", time.Now().Format(time.Kitchen), "current_zone", zone)
 	}
+
+	zone, _ := time.Now().Zone()
+	log.Debug("🕐", "current_time", time.Now().Format(time.Kitchen), "current_zone", zone)
 
 	e := echo.New()
 	e.HideBanner = true
@@ -127,24 +155,33 @@ func main() {
 	if baseConfig.Kiosk.Password != "" {
 		e.Use(middleware.KeyAuthWithConfig(middleware.KeyAuthConfig{
 			Skipper: func(c echo.Context) bool {
-				// skip auth for assets
-				return strings.HasPrefix(c.Request().URL.String(), "/assets")
+				// skip auth for assets and /health endpoint
+				path := c.Request().URL.Path
+				return strings.HasPrefix(path, "/assets/") || path == "/health" || path == "/favicon.ico"
 			},
 			KeyLookup: "header:Authorization,header:X-Api-Key,query:authsecret,query:password,form:authsecret,form:password",
 			Validator: func(queryPassword string, _ echo.Context) (bool, error) {
 				return queryPassword == baseConfig.Kiosk.Password, nil
 			},
-			ErrorHandler: func(_ error, c echo.Context) error {
+			ErrorHandler: func(err error, c echo.Context) error {
+				if baseConfig.Kiosk.Debug || baseConfig.Kiosk.DebugVerbose {
+					log.Warn("unauthorized request",
+						"IP", c.RealIP(),
+						"method", c.Request().Method,
+						"URL", c.Request().URL.String(),
+						"error", err)
+				}
 				return routes.RenderUnauthorized(c)
 			},
 		}))
 	}
 
 	// CSS cache busting
-	e.FileFS("/assets/css/kiosk.*.css", "frontend/public/assets/css/kiosk.css", public, StaticCacheMiddleware)
+	e.FileFS("/assets/css/kiosk.*.css", "frontend/public/assets/css/kiosk.css", public, StaticCacheMiddlewareWithConfig(baseConfig))
 
 	// JS cache busting
-	e.FileFS("/assets/js/kiosk.*.js", "frontend/public/assets/js/kiosk.js", public, StaticCacheMiddleware)
+	e.FileFS("/assets/js/kiosk.*.js", "frontend/public/assets/js/kiosk.js", public, StaticCacheMiddlewareWithConfig(baseConfig))
+	e.FileFS("/assets/js/url-builder.*.js", "frontend/public/assets/js/url-builder.js", public, StaticCacheMiddlewareWithConfig(baseConfig))
 
 	// serve embdedd staic assets
 	e.StaticFS("/assets", echo.MustSubFS(public, "frontend/public/assets"))
@@ -157,6 +194,16 @@ func main() {
 
 	e.GET("/", routes.Home(baseConfig, c))
 
+	e.GET("/health", func(c echo.Context) error {
+		return c.String(http.StatusOK, "OK")
+	})
+
+	if baseConfig.Kiosk.EnableURLBuilder {
+		e.GET("/url-builder", routes.URLBuilderPage(baseConfig, c, false))
+		e.GET("/url-builder/extended", routes.URLBuilderPage(baseConfig, c, true))
+		e.POST("/url-builder/build", routes.BuildURL(baseConfig))
+	}
+
 	e.GET("/about", routes.About(baseConfig))
 
 	e.GET("/assets/manifest.json", routes.Manifest)
@@ -164,7 +211,7 @@ func main() {
 	e.GET("/image", routes.Image(baseConfig, c))
 	e.GET("/image/reload", routes.ImageWithReload(baseConfig))
 
-	e.GET("/image/:imageID", routes.ImageWithID(baseConfig, c))
+	e.GET("/image/:imageID", routes.ImageWithID(baseConfig, c), AssetCacheMiddlewareWithConfig(baseConfig))
 
 	e.POST("/asset/new", routes.NewAsset(baseConfig, c))
 
@@ -193,15 +240,27 @@ func main() {
 
 	e.POST("/webhooks", routes.Webhooks(baseConfig, c), middleware.RateLimiter(middleware.NewRateLimiterMemoryStore(rate.Limit(20))))
 
-	e.GET("/video/:videoID", routes.NewVideo(baseConfig.Kiosk.DemoMode))
+	e.GET("/live/:liveID", routes.LivePhoto(baseConfig.Kiosk.DemoMode, baseConfig.Kiosk.Password))
+
+	e.GET("/video/:videoID", routes.NewVideo(baseConfig.Kiosk.DemoMode), AssetCacheMiddlewareWithConfig(baseConfig))
 
 	e.GET("/:redirect", routes.Redirect(baseConfig, c))
 
 	for _, w := range baseConfig.WeatherLocations {
-		go weather.AddWeatherLocation(c.Context(), w)
+		if w.Forecast {
+			go weather.AddWeatherLocationWithForecast(c.Context(), w)
+		} else {
+			go weather.AddWeatherLocation(c.Context(), w)
+		}
 	}
 
-	fmt.Printf("\nKiosk listening on port %s\n\n", versionStyle(strconv.Itoa(baseConfig.Kiosk.Port)))
+	if logLevel == log.ErrorLevel || logLevel == log.WarnLevel {
+		fmt.Printf("\nKiosk listening on port %s\n\n", versionStyle(strconv.Itoa(baseConfig.Kiosk.Port)))
+	} else {
+		fmt.Println("")
+		log.Info("Kiosk listening on", "port", baseConfig.Kiosk.Port)
+		fmt.Println("")
+	}
 
 	go func() {
 		startErr := e.Start(fmt.Sprintf(":%v", baseConfig.Kiosk.Port))
@@ -215,14 +274,38 @@ func main() {
 	video.Delete()
 
 	fmt.Println("")
-	log.Info("Kiosk shutting down")
-	fmt.Println("")
+	if logLevel == log.ErrorLevel || logLevel == log.WarnLevel {
+		fmt.Println("Kiosk shutting down")
+	} else {
+		log.Info("Kiosk shutting down")
+		fmt.Println("")
+	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
 	if shutdownErr := e.Shutdown(ctx); shutdownErr != nil {
 		log.Error(shutdownErr)
+	}
+}
+
+func setLogLevel(logLevel *log.Level) {
+	logLevelStr := os.Getenv("KIOSK_LOG_LEVEL")
+	switch strings.ToLower(logLevelStr) {
+	case "debug":
+		*logLevel = log.DebugLevel
+		os.Setenv("KIOSK_DEBUG", "true")
+	case "verbose":
+		*logLevel = log.DebugLevel
+		os.Setenv("KIOSK_DEBUG_VERBOSE", "true")
+	case "info":
+		*logLevel = log.InfoLevel
+	case "warn", "warning":
+		*logLevel = log.WarnLevel
+	case "error":
+		*logLevel = log.ErrorLevel
+	default:
+		*logLevel = log.WarnLevel
 	}
 }
 
@@ -234,10 +317,32 @@ func NoCacheMiddleware(next echo.HandlerFunc) echo.HandlerFunc {
 	}
 }
 
-// Middleware for static routes
-func StaticCacheMiddleware(next echo.HandlerFunc) echo.HandlerFunc {
-	return func(c echo.Context) error {
-		c.Response().Header().Set("Cache-Control", "public, max-age=86400, immutable")
-		return next(c)
+// Middleware for static routes with access to baseConfig
+func StaticCacheMiddlewareWithConfig(baseConfig *config.Config) echo.MiddlewareFunc {
+	return func(next echo.HandlerFunc) echo.HandlerFunc {
+
+		if baseConfig.Kiosk.Debug || baseConfig.Kiosk.DebugVerbose {
+			return NoCacheMiddleware(next)
+		}
+
+		return func(c echo.Context) error {
+			c.Response().Header().Set("Cache-Control", "public, max-age=31536000, immutable")
+			return next(c)
+		}
+	}
+}
+
+// Middleware for asset(s) routes with access to baseConfig
+func AssetCacheMiddlewareWithConfig(baseConfig *config.Config) echo.MiddlewareFunc {
+	return func(next echo.HandlerFunc) echo.HandlerFunc {
+
+		if baseConfig.Kiosk.Debug || baseConfig.Kiosk.DebugVerbose {
+			return NoCacheMiddleware(next)
+		}
+
+		return func(c echo.Context) error {
+			c.Response().Header().Set("Cache-Control", "private, max-age=86400, no-transform")
+			return next(c)
+		}
 	}
 }
